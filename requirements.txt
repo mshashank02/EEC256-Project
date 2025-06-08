@@ -1,0 +1,7 @@
+gymnasium_robotics
+gymnasium[other]
+stable-baselines3
+sb3-contrib
+wandb
+imageio
+tensorboard
