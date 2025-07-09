@@ -1,57 +1,80 @@
-import gymnasium as gym 
-import numpy as np 
-import gymnasium_robotics
-import torch 
-import torch.nn as nn 
-import torchvision.transforms as T
-import torch.hub
+import gymnasium as gym
+import numpy as np
+import torch, torch.nn as nn, torchvision.transforms as T
 
-class ShadowHandCubeRotation_ImageWrapper(gym.ObservationWrapper):
-    def __init__(self, env, n_joint, n_tactile, device='cuda'):
+class ShadowHandImageWrapper_VisualGoal(gym.ObservationWrapper):
+    def __init__(self, env, use_tactile=True, device='cuda'):
         super().__init__(env)
 
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
+
+        # Load frozen ResNet-50
         self.resnet = torch.hub.load('facebookresearch/swav:main', 'resnet50')
         self.resnet.fc = nn.Identity()
         self.resnet.eval().to(self.device)
+        for p in self.resnet.parameters():
+            p.requires_grad = False
 
-        for param in self.resnet.parameters():
-            param.requires_grad = False
-
-        #Preprocessing but not resizing to lower resolution to maintain finer detail, only tensor conversion and normalization
-        self.preprocess = T.Compose([
+        # Normalize and convert to tensor
+        self.preproc = T.Compose([
             T.ToTensor(),
-            T.Normalize(mean=[0.485, 0.456, 0.406], 
-                        std=[0.229, 0.224, 0.225]),
+            T.Normalize([0.485, 0.456, 0.406],
+                        [0.229, 0.224, 0.225])
         ])
 
-        self.n_joint = n_joint
-        self.n_resnet_features = 2048
-        self.n_tactile = n_tactile
+        self.use_tactile = use_tactile
+        self.n_tactile = 92 if use_tactile else 0
+        self.n_resnet_feat = 2048
+        self.kinematic_indices = np.arange(48)
 
-        low = np.full(self.n_joint+self.n_resnet_features+self.n_tactile,-np.inf, dtype=np.float32)
-        high = np.full(self.n_joint+self.n_resnet_features+self.n_tactile,np.inf, dtype=np.float32)
+        total_dim = len(self.kinematic_indices) + self.n_resnet_feat + self.n_resnet_feat + self.n_tactile
 
         self.observation_space = gym.spaces.Dict({
-            "observation": gym.spaces.Box(low=low, high=high, dtype=np.float32),
-            "achieved_goal": self.env.observation_space['achieved_goal'],
-            "desired_goal": self.env.observation_space['desired_goal'],
+            "observation": gym.spaces.Box(low=-np.inf, high=np.inf, shape=(total_dim,), dtype=np.float32),
+            "achieved_goal": self.env.observation_space["achieved_goal"],
+            "desired_goal": self.env.observation_space["desired_goal"],
         })
 
-    def observation(self, obs):
-        joint_states = obs['observation'][:self.n_joint]
-        tactile_readings = obs['observation'][-self.n_tactile:]
-
-        img = self.render()
-        img_tensor = self.preprocess(img).unsqueeze(0).to(self.device)
-
+    def get_resnet_features(self, img):
+        img_tensor = self.preproc(img).unsqueeze(0).to(self.device)
         with torch.no_grad():
-            features = self.resnet(img_tensor).flatten().cpu().numpy()
+            feat = self.resnet(img_tensor).flatten().cpu().numpy()
+        return feat
 
-        new_obs = np.concatenate([joint_states, features, tactile_readings], axis=0)
+    def render_goal_image(self, goal_pose):
+        # Save current object pose
+        original_pose = self.env.sim.data.get_joint_qpos("object:joint").copy()
+
+        # Set cube to goal pose
+        self.env.sim.data.set_joint_qpos("object:joint", goal_pose)
+        self.env.sim.forward()
+
+        img = self.env.render()
+
+        # Restore original object pose
+        self.env.sim.data.set_joint_qpos("object:joint", original_pose)
+        self.env.sim.forward()
+
+        return img
+
+    def observation(self, obs):
+        state = obs["observation"]
+        kinematic = state[self.kinematic_indices]
+        tactile = state[-self.n_tactile:] if self.use_tactile else np.array([])
+
+        # Current image
+        current_img = self.render()
+        current_feat = self.get_resnet_features(current_img)
+
+        # Goal image
+        goal_pose = obs["desired_goal"]
+        goal_img = self.render_goal_image(goal_pose)
+        goal_feat = self.get_resnet_features(goal_img)
+
+        combined_obs = np.concatenate([kinematic, current_feat, goal_feat, tactile], axis=0)
 
         return {
-            "observation": new_obs,
+            "observation": combined_obs,
             "achieved_goal": obs["achieved_goal"],
-            "desired_goal": obs["desired_goal"],
+            "desired_goal": obs["desired_goal"]
         }
