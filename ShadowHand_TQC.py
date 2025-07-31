@@ -11,6 +11,7 @@ from stable_baselines3.common.vec_env import SubprocVecEnv, VecVideoRecorder, Ve
 from sb3_contrib.common.wrappers import TimeFeatureWrapper
 import wandb
 from wandb.integration.sb3 import WandbCallback
+from ShadowHandImageWrapper import ShadowHandImageWrapper_NoCubeState
 import warnings
 
 # ignore warning. it does not affect the training
@@ -103,6 +104,10 @@ def make_env(env_id, seed, rank):
     def _init():
         env = gym.make(env_id, render_mode="rgb_array")
         env.reset(seed=seed + rank)
+
+        #Image wrapper for vision features 
+        env = ShadowHandImageWrapper_NoCubeState(env)
+
         env = Monitor(env)
         env = TimeFeatureWrapper(env)
         return env
@@ -112,6 +117,10 @@ def make_eval_env(env_id, seed):
     def _init():
         env = gym.make(env_id, render_mode="rgb_array")
         env.reset(seed=seed)
+
+        #Image wrapper fr vision
+        env = ShadowHandImageWrapper_NoCubeState(env)
+
         env = Monitor(env) 
         env = TimeFeatureWrapper(env)
         return env
